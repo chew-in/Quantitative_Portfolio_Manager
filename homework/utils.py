@@ -142,16 +142,35 @@ def rolling_oos(returns, year_start=2013, year_end=2023, target_mean=0.015, tip_
     return port_oos.dropna()
 
 
-def regression_statistics_annualized(returns, benchmark, annual_factor=12):
-    """Calculate regression statistics for each asset against a benchmark, annualized."""
+def regression_statistics_annualized(returns, factors, intercept=True, annual_factor=12):
+    """Calculate regression statistics for each asset against factors (dataframe) or benchmark (series), annualized."""
+    if intercept:
+        factors = sm.add_constant(factors)
     results = pd.DataFrame(index=returns.columns)
     for col in returns.columns:
-        regr = sm.OLS(returns[col], sm.add_constant(benchmark)).fit()
-        results.loc[col, 'Alpha'] = regr.params[0] * annual_factor
-        results.loc[col, 'Beta'] = regr.params[1]
+        regr = sm.OLS(returns[col], factors).fit()
+        if intercept:
+            results.loc[col, 'Alpha'] = regr.params[0] * annual_factor
+            for i, factor in enumerate(factors.columns[1:]):
+                results.loc[col, f'{factor}'] = regr.params[i + 1]
+            results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params[1:]) * annual_factor
+            results.loc[col, 'Information Ratio'] = regr.params[0] / regr.resid.std() * np.sqrt(annual_factor)
+        else:
+            for i, factor in enumerate(factors.columns):
+                results.loc[col, f'{factor}'] = regr.params[i]
+            results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params) * annual_factor
         results.loc[col, 'R^2'] = regr.rsquared
-        results.loc[col, 'Treynor Ratio'] = returns[col].mean() / regr.params[1] * annual_factor
-        results.loc[col, 'Information Ratio'] = regr.params[0] / regr.resid.std() * np.sqrt(annual_factor)
+    return results
+
+
+def cross_sectional_regression_statistics(mean_returns, betas, intercept=False):
+    """Calculate regression statistics for each asset against a benchmark, annualized."""
+    if intercept:
+        betas = sm.add_constant(betas)
+    regr = sm.OLS(mean_returns, betas).fit()
+    results = regr.params.to_frame('Cross-Sectional Regression')
+    results.loc['R^2'] = regr.rsquared
+    results.loc['MAE'] = regr.resid.abs().mean()
     return results
 
 
