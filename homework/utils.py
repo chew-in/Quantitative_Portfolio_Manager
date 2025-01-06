@@ -142,7 +142,7 @@ def rolling_oos(returns, year_start=2013, year_end=2023, target_mean=0.015, tip_
     return port_oos.dropna()
 
 
-def regression_statistics_annualized(returns, factors, intercept=True, annual_factor=12):
+def time_series_regression_annualized(returns, factors, intercept=True, annual_factor=12):
     """Calculate regression statistics for each asset against factors (dataframe) or benchmark (series), annualized."""
     if intercept:
         factors = sm.add_constant(factors)
@@ -156,15 +156,15 @@ def regression_statistics_annualized(returns, factors, intercept=True, annual_fa
             results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params[1:]) * annual_factor
             results.loc[col, 'Information Ratio'] = regr.params[0] / regr.resid.std() * np.sqrt(annual_factor)
         else:
-            for i, factor in enumerate(factors.columns):
+            for i, factor in enumerate(factors.columns[1:]):
                 results.loc[col, f'{factor}'] = regr.params[i]
             results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params) * annual_factor
         results.loc[col, 'R^2'] = regr.rsquared
     return results
 
 
-def cross_sectional_regression_statistics(mean_returns, betas, intercept=False):
-    """Calculate regression statistics for each asset against a benchmark, annualized."""
+def cross_sectional_regression(mean_returns, betas, intercept=False):
+    """Calculate cross-section regression statistics for mean returns against respective betas."""
     if intercept:
         betas = sm.add_constant(betas)
     regr = sm.OLS(mean_returns, betas).fit()
