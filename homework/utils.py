@@ -39,6 +39,7 @@ def performance_metrics_annualized(returns, annual_factor=12):
 def maximum_drawdown(returns):
     """Calculate the maximum drawdown for each asset for returns,
     and max/min/recovery dates within the max drawdown period."""
+    assert not returns.isnull().any().any()
     cum_returns = (1 + returns).cumprod()
     rolling_max = cum_returns.cummax()
     drawdowns = (cum_returns - rolling_max) / rolling_max
@@ -142,25 +143,18 @@ def rolling_oos(returns, year_start=2013, year_end=2023, target_mean=0.015, tip_
     return port_oos.dropna()
 
 
-def time_series_regression_annualized(returns, factors, intercept=True, annual_factor=12):
-    """Calculate regression statistics for each asset against factors (dataframe) or benchmark (series), annualized."""
-    if intercept:
-        factors = sm.add_constant(factors)
-    results = pd.DataFrame(index=returns.columns)
-    for col in returns.columns:
-        regr = sm.OLS(returns[col], factors).fit()
-        if intercept:
-            results.loc[col, 'Alpha'] = regr.params[0] * annual_factor
-            for i, factor in enumerate(factors.columns[1:]):
-                results.loc[col, f'{factor}'] = regr.params[i + 1]
-            results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params[1:]) * annual_factor
-            results.loc[col, 'Information Ratio'] = regr.params[0] / regr.resid.std() * np.sqrt(annual_factor)
-        else:
-            for i, factor in enumerate(factors.columns[1:]):
-                results.loc[col, f'{factor}'] = regr.params[i]
-            results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params) * annual_factor
-        results.loc[col, 'R^2'] = regr.rsquared
-    return results
+def correlation_heatmap(returns):
+    """Plot a heatmap of the correlation matrix of the returns, off-diagonal only.
+    Print MIN, MAX of correlations."""
+    corr_matrix = returns.corr()
+    mask = np.eye(corr_matrix.shape[0], dtype=bool) # Highlight diagonal
+    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', mask=mask, fmt='.2f')
+    plt.xticks(rotation=45)
+    plt.show()
+    corrs = corr_matrix.unstack().sort_values(ascending=False)
+    corrs = corrs[corrs != 1] # Remove self-correlations
+    print(f"Max corr {max(corrs):.2f}: {corrs.idxmax()}")
+    print(f"Min corr {min(corrs):.2f}: {corrs.idxmin()}")
 
 
 def cross_sectional_regression(mean_returns, betas, intercept=False):
@@ -174,18 +168,27 @@ def cross_sectional_regression(mean_returns, betas, intercept=False):
     return results
 
 
-def correlation_heatmap(returns):
-    """Plot a heatmap of the correlation matrix of the returns, off-diagonal only.
-    Print MIN, MAX of correlations."""
-    corr_matrix = returns.corr()
-    mask = np.eye(corr_matrix.shape[0], dtype=bool) # Highlight diagonal
-    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', mask=mask, fmt='.2f')
-    plt.xticks(rotation=45)
-    plt.show()
-    corrs = corr_matrix.unstack().sort_values(ascending=False)
-    corrs = corrs[corrs != 1] # Remove self-correlations
-    print(f"Max corr {max(corrs):.2f}: {corrs.idxmax()}")
-    print(f"Min corr {min(corrs):.2f}: {corrs.idxmin()}")
+def time_series_regression_annualized(returns, factors, intercept=True, annual_factor=12):
+    """Calculate regression statistics for each asset against factors (dataframe) or benchmark (series), annualized."""
+    if intercept:
+        factors = sm.add_constant(factors)
+    results = pd.DataFrame(index=returns.columns)
+    regrs = []
+    for col in returns.columns:
+        regr = sm.OLS(returns[col], factors, missing='drop').fit()
+        if intercept:
+            results.loc[col, 'Alpha'] = regr.params[0] * annual_factor
+            for i, factor in enumerate(factors.columns[1:]):
+                results.loc[col, f'{factor} Beta'] = regr.params[i + 1]
+            results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params[1:]) * annual_factor
+            results.loc[col, 'Information Ratio'] = regr.params[0] / regr.resid.std() * np.sqrt(annual_factor)
+        else:
+            for i, factor in enumerate(factors.columns):
+                results.loc[col, f'{factor} Beta'] = regr.params[i]
+            results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params) * annual_factor
+        results.loc[col, 'R^2'] = regr.rsquared
+        regrs.append(regr)
+    return {'df': results, 'regrs': regrs}
 
 
 def rolling_regression(returns, factors, window=60, intercept=True):
@@ -203,3 +206,37 @@ def rolling_regression(returns, factors, window=60, intercept=True):
         return pd.DataFrame({'Actual': returns, 'Static IS YesInt': replication_static, 'Rolling IS YesInt': replication_is, 'Rolling OOS YesInt': replication_oos})
     return pd.DataFrame({'Actual': returns, 'Static IS NoInt': replication_static, 'Rolling IS NoInt': replication_is, 'Rolling OOS NoInt': replication_oos})
     
+
+def expanding_regression(returns, factors, start_window=60, intercept=True):
+    """Calculate out-of-sample R-squared using expanding window regression.
+        returns (pd.Series): The dependent variable (e.g., asset returns).
+        factors (pd.DataFrame): The independent variables (e.g., factors/signals."""
+    factors = factors.shift()
+    oos_errors = []
+    null_errors = []
+    if intercept:
+        factors = sm.add_constant(factors)
+    for t in range(start_window, len(returns)):
+        regr = sm.OLS(returns.iloc[:t], factors.iloc[:t], missing='drop').fit()
+        # oos_forecast = np.dot(regr.params, factors.iloc[t])
+        oos_forecast = regr.predict(factors.iloc[t])[0]
+        oos_errors.append(returns.iloc[t] - oos_forecast)
+        null_forecast = returns.iloc[:t].mean()
+        null_errors.append(returns.iloc[t] - null_forecast)
+    oos_R2 = 1 - (np.array(oos_errors)**2).sum() / (np.array(null_errors)**2).sum()
+    return oos_R2
+
+
+def calculate_and_summarize_strategy(regr, signals, total_returns, excess_returns, regr_name, column_names, multi_factor=False):
+    """
+    Calculate weights, strategy returns, and summary statistics for a given column.
+    """
+    if multi_factor:
+        weights = 100 * ((signals.shift()[column_names] * regr.loc[regr_name, column_names]).sum(axis=1) + regr.loc[regr_name, 'Alpha'] / 12)
+    else:
+        weights = 100 * (signals.shift()[regr_name] * regr.loc[regr_name, column_names[0]] + regr.loc[regr_name, 'Alpha'] / 12)
+    strategy_returns = pd.DataFrame((weights * total_returns['SPY']).dropna(), columns=[regr_name])
+    return pd.concat([summary_statistics_annualized(strategy_returns)[['Mean', 'Vol', 'Sharpe', 'Max Drawdown']],
+                      time_series_regression_annualized(strategy_returns, excess_returns[['SPY']].loc[strategy_returns.index])],
+                      axis=1)
+
