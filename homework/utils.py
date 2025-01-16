@@ -176,18 +176,18 @@ def time_series_regression_annualized(returns, factors, intercept=True, annual_f
     regrs = []
     for col in returns.columns:
         regr = sm.OLS(returns[col], factors, missing='drop').fit()
+        regrs.append(regr)
         if intercept:
             results.loc[col, 'Alpha'] = regr.params[0] * annual_factor
             for i, factor in enumerate(factors.columns[1:]):
                 results.loc[col, f'{factor} Beta'] = regr.params[i + 1]
             results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params[1:]) * annual_factor
-            results.loc[col, 'Information Ratio'] = regr.params[0] / regr.resid.std() * np.sqrt(annual_factor)
+            results.loc[col, 'IR'] = regr.params[0] / regr.resid.std() * np.sqrt(annual_factor)
         else:
             for i, factor in enumerate(factors.columns):
                 results.loc[col, f'{factor} Beta'] = regr.params[i]
             results.loc[col, 'Treynor Ratio'] = returns[col].mean() / sum(regr.params) * annual_factor
         results.loc[col, 'R^2'] = regr.rsquared
-        regrs.append(regr)
     return {'df': results, 'regrs': regrs}
 
 
@@ -227,16 +227,53 @@ def expanding_regression(returns, factors, start_window=60, intercept=True):
     return oos_R2
 
 
-def calculate_and_summarize_strategy(regr, signals, total_returns, excess_returns, regr_name, column_names, multi_factor=False):
+def strategy_lagged_regression(returns, factors, intercept=True, annual_factor=12):
     """
-    Calculate weights, strategy returns, and summary statistics for a given column.
+    Calculate a strategy using lagged regression over the entire period 
+    by assigning weights as 100 * prediction.
+        returns (pd.DataFrame): Single-column DataFrame of dependent variable (e.g., asset returns).
+        factors (pd.DataFrame): DataFrame of independent variables (e.g., factors/signals).
+    Returns:
+        pd.DataFrame: Strategy returns with weights based on lagged regression predictions.
     """
-    if multi_factor:
-        weights = 100 * ((signals.shift()[column_names] * regr.loc[regr_name, column_names]).sum(axis=1) + regr.loc[regr_name, 'Alpha'] / 12)
-    else:
-        weights = 100 * (signals.shift()[regr_name] * regr.loc[regr_name, column_names[0]] + regr.loc[regr_name, 'Alpha'] / 12)
-    strategy_returns = pd.DataFrame((weights * total_returns['SPY']).dropna(), columns=[regr_name])
-    return pd.concat([summary_statistics_annualized(strategy_returns)[['Mean', 'Vol', 'Sharpe', 'Max Drawdown']],
-                      time_series_regression_annualized(strategy_returns, excess_returns[['SPY']].loc[strategy_returns.index])],
-                      axis=1)
+    factors = factors.shift()
+    regr = time_series_regression_annualized(returns, factors, intercept, annual_factor)['regrs'][0]
+    if intercept:
+        factors = sm.add_constant(factors)
+    # weights = 100 * (factors * regr.params).dropna().sum(axis=1)
+    weights = 100 * regr.fittedvalues # prediction
+    strategy_returns = (weights * returns.iloc[:, 0]).dropna()
+    return pd.DataFrame(strategy_returns, columns=['-'.join(factors.columns)])
 
+
+def strategy_expanding_regression(returns, factors, start_window=60, intercept=True):
+    """Calculate strategy statistics using expanding regression."""
+    factors = factors.shift()
+    if intercept:
+        factors = sm.add_constant(factors)
+    oos_strategy_returns = []
+    for t in range(start_window, len(returns)):
+        regr = sm.OLS(returns.iloc[:t], factors.iloc[:t], missing='drop').fit()
+        oos_forecast = regr.predict(factors.iloc[[t]])[0]
+        weight = 100 * oos_forecast
+        oos_strategy_returns.append(weight * returns.iloc[t, 0])
+    oos_strategy_returns = pd.DataFrame(oos_strategy_returns, columns=['-'.join(factors.columns)], index=returns.index[start_window:])
+    return oos_strategy_returns
+
+
+def strategy_statistics_annualized(strategy_returns, market, risk_free_rate):
+    """
+    Calculate strategy statistics using lagged regression over the entire period.
+        returns (pd.DataFrame): Single-column DataFrame of dependent variable (e.g., asset returns).
+        factors (pd.DataFrame): DataFrame of independent variables (e.g., factors/signals).
+        market (pd.DataFrame): DataFrame of market returns.
+    Returns:
+        pd.DataFrame: Strategy statistics.
+    """
+    sum_df = summary_statistics_annualized(strategy_returns)[['Mean', 'Vol', 'Sharpe', 'Max Drawdown', 'VaR 5%']]
+    reg_df = time_series_regression_annualized(strategy_returns, market.loc[strategy_returns.index])['df'].add_prefix('Market ')
+    negative_risk_premium_months = len(
+        strategy_returns[strategy_returns.iloc[:, 0] - risk_free_rate.loc[strategy_returns.index].iloc[:, 0] < 0]
+    )
+    sum_df['Negative Risk Premium Months'] = negative_risk_premium_months
+    return pd.concat([sum_df, reg_df], axis=1)
